@@ -26,22 +26,29 @@ except Exception as e:
     transactions_collection = None
 
 def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, source: str = "text"):
-    """Saves a new transaction document, including the category."""
+    """
+    Saves a new transaction document with the new keywords schema.
+    The 'merchant' field is now the first keyword.
+    """
     if transactions_collection is None:
         print("❌ Cannot save transaction, database not connected.")
         return None
 
+    # Standardize keywords: ensure they are clean and in a list.
+    keywords = parsed_data.get('keywords', [])
+    if not isinstance(keywords, list):
+        keywords = [keywords]
+
     document = {
         "rawText": raw_text,
         "parsedData": {
-            "amount": parsed_data.get("amount"),
+            "amount": round(float(parsed_data.get("amount", 0.0)), 2),
             "currency": parsed_data.get("currency", "SGD"),
-            "merchant": parsed_data.get("merchant"),
-            "date": parsed_data.get("date", datetime.now().date().isoformat())
+            "keywords": keywords # Save the new keywords array
         },
         "source": source,
         "imageUrl": image_url,
-        "category": parsed_data.get("category", "Uncategorized"), # Save the AI-suggested category
+        "category": parsed_data.get("category", "Uncategorized"),
         "createdAt": datetime.now()
     }
 
@@ -55,12 +62,7 @@ def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, so
 
 def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
     """
-    Fetches transactions based on dynamic filters and aggregates them.
-    
-    Args:
-        timeframe (str): 'day', 'week', 'month', or 'all'.
-        filter_type (str): 'category' or 'merchant'.
-        filter_value (str): The specific category or merchant to filter by.
+    Fetches transactions based on dynamic filters. Now also searches keywords.
     """
     if transactions_collection is None:
         return None
@@ -75,20 +77,16 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
     elif timeframe == 'month':
         start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
-    # --- Build the MongoDB query pipeline ---
     pipeline = []
     
-    # 1. Match by date
     if start_date:
         pipeline.append({"$match": {"createdAt": {"$gte": start_date}}})
         
-    # 2. Match by category or merchant if specified
     if filter_type and filter_value:
-        field_to_filter = "category" if filter_type == "category" else "parsedData.merchant"
-        # Use a case-insensitive regex for flexible matching
+        # Search both category and the new keywords array
+        field_to_filter = "category" if filter_type == "category" else "parsedData.keywords"
         pipeline.append({"$match": {field_to_filter: {"$regex": f"^{filter_value}$", "$options": "i"}}})
 
-    # 3. Group by category and sum amounts
     pipeline.append({
         "$group": {
             "_id": "$category",
@@ -97,7 +95,6 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
         }
     })
     
-    # 4. Sort by the total amount descending
     pipeline.append({"$sort": {"totalAmount": -1}})
 
     try:

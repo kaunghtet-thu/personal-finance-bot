@@ -9,6 +9,10 @@ import spacy
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
+# --- Windows Tesseract Configuration ---
+if os.name == 'nt':
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
 # Load environment variables to get the API key
 load_dotenv()
 # Instantiate the new client
@@ -34,7 +38,7 @@ COMMON_MERCHANTS = [
 
 async def get_category_from_openai(merchant: str, amount: float) -> str:
     """
-    Uses OpenAI to categorize a transaction based on the merchant.
+    Uses OpenAI to categorize a transaction based on the merchant name.
     """
     if not client.api_key:
         print("⚠️ OpenAI API key not found. Skipping categorization.")
@@ -52,7 +56,7 @@ async def get_category_from_openai(merchant: str, amount: float) -> str:
             ],
             temperature=0,
             max_tokens=20,
-            timeout=10 # Add a timeout to prevent long waits
+            timeout=10
         )
         category = response.choices[0].message.content.strip()
         print(f"🧠 OpenAI suggested category: {category}")
@@ -61,9 +65,9 @@ async def get_category_from_openai(merchant: str, amount: float) -> str:
         print(f"❌ OpenAI Error: {e}")
         return "Uncategorized"
 
-async def extract_from_text(text: str, with_category: bool = True) -> dict:
+async def extract_initial_details(text: str) -> dict:
     """
-    Extracts transaction details. Can optionally skip AI categorization.
+    Extracts the initial amount and merchant (as the first keyword).
     """
     parsed_data = {}
     text = text.strip()
@@ -79,17 +83,17 @@ async def extract_from_text(text: str, with_category: bool = True) -> dict:
             amount_str = found_numbers[-1]
 
     if amount_str:
-        parsed_data["amount"] = float(amount_str)
+        parsed_data["amount"] = round(float(amount_str), 2)
         parsed_data["currency"] = "SGD"
 
-    # 2. Merchant Extraction
+    # 2. Merchant Extraction (to be used as the first keyword)
     merchant = "Unknown"
     text_for_merchant = text
     if amount_str:
         text_for_merchant = re.sub(r'\b' + re.escape(amount_str) + r'\b', '', text_for_merchant, 1).strip()
 
     if not text_for_merchant:
-        parsed_data["merchant"] = "Unknown"
+        merchant = "Unknown"
     else:
         lower_text = text_for_merchant.lower()
         for known_merchant in COMMON_MERCHANTS:
@@ -113,18 +117,15 @@ async def extract_from_text(text: str, with_category: bool = True) -> dict:
                         merchant = word.title()
                         break
 
-    parsed_data["merchant"] = merchant.strip().title()
-    if parsed_data["merchant"].lower() in ['sgd', '$', 's$']:
-        parsed_data["merchant"] = "Unknown"
+    merchant = merchant.strip().title()
+    if merchant.lower() in ['sgd', '$', 's$']:
+        merchant = "Unknown"
+    
+    # The merchant is now the first keyword
+    parsed_data["keywords"] = [merchant] if merchant != "Unknown" else []
         
     print(f"Found amount: {parsed_data.get('amount')}")
-    print(f"Found merchant: {parsed_data['merchant']}")
-
-    # 3. AI-powered Categorization (optional)
-    if with_category and parsed_data.get("amount") and parsed_data.get("merchant") != "Unknown":
-        parsed_data["category"] = await get_category_from_openai(parsed_data["merchant"], parsed_data["amount"])
-    else:
-        parsed_data["category"] = "Uncategorized"
+    print(f"Initial keyword (merchant): {merchant}")
 
     parsed_data["date"] = datetime.now().date().isoformat()
     return parsed_data
@@ -137,8 +138,8 @@ def preprocess_image_for_ocr(image_bytes: bytearray) -> Image.Image:
     image = enhancer.enhance(2)
     return image
 
-async def extract_from_image(image_bytes: bytearray, with_category: bool = True) -> tuple[str, dict]:
-    """Performs OCR and then extracts transaction details."""
+async def extract_from_image(image_bytes: bytearray) -> tuple[str, dict]:
+    """Performs OCR and then extracts initial transaction details."""
     try:
         processed_image = preprocess_image_for_ocr(image_bytes)
         custom_config = r'--oem 3 --psm 6'
@@ -146,7 +147,7 @@ async def extract_from_image(image_bytes: bytearray, with_category: bool = True)
         print(f"🔍 OCR Result:\n---\n{ocr_text}\n---")
         if not ocr_text.strip():
             return "No text found in image.", {}
-        parsed_data = await extract_from_text(ocr_text, with_category)
+        parsed_data = await extract_initial_details(ocr_text)
         return ocr_text, parsed_data
     except Exception as e:
         print(f"❌ OCR Error: {e}")

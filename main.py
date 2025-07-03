@@ -8,7 +8,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
     CallbackQueryHandler,
-    PicklePersistence # Import PicklePersistence for robust state handling
+    PicklePersistence
 )
 from bot import handlers
 
@@ -19,17 +19,13 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in .env file!")
 
-    # --- Set up persistence ---
-    # This will save conversation states to a file, making the bot more stable.
     persistence = PicklePersistence(filepath="conversation_persistence")
-
     application = ApplicationBuilder().token(token).persistence(persistence).build()
 
     # --- Set up the main ConversationHandler for menu navigation ---
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", handlers.start)],
         states={
-            # State for when the main menu is displayed
             handlers.MAIN_MENU: [
                 CallbackQueryHandler(handlers.start_transaction_flow, pattern="^record_transaction$"),
                 CallbackQueryHandler(handlers.start_recap_flow, pattern="^view_recap$"),
@@ -41,26 +37,31 @@ def main():
             handlers.GETTING_MERCHANT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.received_merchant)
             ],
+            handlers.GETTING_KEYWORDS: [
+                CallbackQueryHandler(handlers.skip_keywords, pattern="^skip_keywords$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.received_keywords)
+            ],
             # State for getting a recap query
             handlers.GETTING_RECAP_QUERY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_recap_query)
             ],
         },
         fallbacks=[CommandHandler("cancel", handlers.cancel), CommandHandler("start", handlers.start)],
-        # Allow re-entry to the start command to show the menu again
         allow_reentry=True,
-        # Use the persistence layer
         persistent=True,
-        name="main_conversation"
+        name="main_conversation",
+        # --- FIX: Explicitly set per_message to silence the warning ---
+        per_message=False
     )
 
-    # Add the main conversation handler to the application
     application.add_handler(conv_handler)
-    
-    # Error handler
     application.add_error_handler(handlers.error_handler)
+    # app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+    # app.add_handler(conv_handler)
+    # app.add_error_handler(error_handler)
 
-    print("🚀 Bot is starting in polling mode with a new menu-driven interface...")
+
+    print("🚀 Bot is starting in polling mode with a new keyword-based interface...")
     application.run_polling()
 
 if __name__ == "__main__":
