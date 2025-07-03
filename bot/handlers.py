@@ -3,7 +3,7 @@ import os
 import json
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
+from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
 
@@ -155,10 +155,8 @@ async def skip_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     transaction_info = context.user_data.get('transaction')
     if not transaction_info:
-        print("No transaction info found. Restarting flow.")
         return await start(update, context)
 
-    # Just skip adding more keywords and finalize the transaction as is
     # Save and send confirmation, then show main menu as a new message (not edit)
     await save_and_confirm_transaction(update, context, transaction_info)
 
@@ -178,42 +176,78 @@ async def start_recap_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Asks the user what they want a recap of."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text="What would you like a recap of?\n\n(e.g., `this week`, `food last month`, `Starbucks spendings`)")
+    await query.edit_message_text(text="What would you like a recap of?\n\n(e.g., `this week`, `show all food transactions`, `Starbucks spendings`)")
     return GETTING_RECAP_QUERY
 
 async def handle_recap_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Parses the user's recap query with AI, fetches data, and generates a summary."""
+    """Parses the user's recap query with AI, fetches data, and generates a summary or list."""
     query_text = update.message.text
     await update.message.reply_text(f"Got it! Analyzing your request: \"{query_text}\"...")
+
     try:
+        # 1. Use AI to parse the user's query into structured data
         parsing_prompt = (
-            "You are a query parsing expert. Analyze the user's request and extract 'timeframe' (day, week, month, all), "
-            "'filter_type' (category, keywords, none), and 'filter_value' (the specific name or 'none') into a JSON object. "
-            "Default timeframe is 'week'. If you can't determine a filter, use 'none'.\n\n"
+            "You are a query parsing expert. Analyze the user's request and extract information into a JSON object. "
+            "The JSON should have: 'action' ('summarize' or 'list'), 'timeframe' (day, week, month, all), "
+            "'filter_type' (category, keywords, none), and 'filter_value' (the specific name or 'none'). "
+            "If the user asks to 'show', 'list', or 'see' transactions, the action is 'list'. Otherwise, it's 'summarize'. "
+            "If the filter value is a general category like 'food', 'transport', set filter_type to 'category'. "
+            "If it's a specific item or brand like 'caifang', 'cig' or 'starbucks', set filter_type to 'keywords'.\n\n"
             f"User request: \"{query_text}\""
         )
-        response = await client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": parsing_prompt}], response_format={"type": "json_object"})
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": parsing_prompt}],
+            response_format={"type": "json_object"}
+        )
         parsed_query = json.loads(response.choices[0].message.content)
         print(f"🧠 AI parsed recap query: {parsed_query}")
 
-        spending_data = connection.get_spending_data(
-            parsed_query.get('timeframe', 'week'), 
-            None if parsed_query.get('filter_type') == 'none' else parsed_query.get('filter_type'), 
-            None if parsed_query.get('filter_value') == 'none' else parsed_query.get('filter_value')
-        )
+        action = parsed_query.get('action', 'summarize')
+        timeframe = parsed_query.get('timeframe', 'week')
+        filter_type = parsed_query.get('filter_type', 'none')
+        filter_value = parsed_query.get('filter_value', 'none')
 
-        if not spending_data:
-            await update.message.reply_text("I couldn't find any matching spending data for your request.")
-            return await start(update, context)
+        if action == 'list':
+            # --- New Logic to List Transactions ---
+            raw_transactions = connection.get_raw_transactions(
+                timeframe,
+                None if filter_type == 'none' else filter_type,
+                None if filter_value == 'none' else filter_value
+            )
+            if not raw_transactions:
+                await update.message.reply_text("I couldn't find any matching transactions for your request.")
+                return await start(update, context)
 
-        summary_prompt = (
-            "You are a friendly financial assistant. Based on the following JSON data, write a short, easy-to-read summary. "
-            "Address the user's original query directly. Mention the total amount and number of transactions if relevant.\n\n"
-            f"User's Original Query: \"{query_text}\"\n"
-            f"Data: {json.dumps(spending_data)}"
-        )
-        summary_response = await client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": summary_prompt}], temperature=0.7, max_tokens=300)
-        await update.message.reply_text(summary_response.choices[0].message.content)
+            response_message = f"Here are the transactions for '<b>{query_text}</b>':\n\n"
+            total_amount = 0
+            for tx in raw_transactions:
+                date_str = tx['createdAt'].strftime('%d %b')
+                amount = tx['parsedData']['amount']
+                total_amount += amount
+                keywords = ", ".join(tx['parsedData'].get('keywords', []))
+                response_message += f"🗓️ {date_str} - <b>SGD {amount:.2f}</b> ({keywords})\n"
+            
+            response_message += f"\n<b>Total: SGD {total_amount:.2f}</b>"
+            await update.message.reply_html(response_message)
+
+        else: # Default action is 'summarize'
+            # --- Existing Logic to Summarize ---
+            spending_data = connection.get_spending_data(timeframe, filter_type, filter_value)
+            if not spending_data:
+                await update.message.reply_text("I couldn't find any matching spending data for your request.")
+                return await start(update, context)
+
+            summary_prompt = (
+                "You are an smart financial assistant who says only necessary information. Based on the following JSON data, write a short, simple-easy-to-read summary. "
+                "Address the user's original query directly. Mention the total amount and number of transactions if relevant.\n\n"
+                "If asked to list the transactions, provide a concise summary of the total amount and number of transactions in a readable list.\n\n"
+                f"User's Original Query: \"{query_text}\"\n"
+                f"Data: {json.dumps(spending_data)}"
+            )
+            summary_response = await client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": summary_prompt}], temperature=0.7, max_tokens=300)
+            await update.message.reply_text(summary_response.choices[0].message.content)
+
     except Exception as e:
         print(f"❌ AI recap error: {e}")
         await update.message.reply_text("Sorry, I had trouble understanding or processing your recap request.")
@@ -237,7 +271,6 @@ async def save_and_confirm_transaction(update: Update, context: ContextTypes.DEF
         f"<b>Category:</b> {parsed_data.get('category', 'Uncategorized')} 🤖\n"
         f"<b>Keywords:</b> {keywords_str}"
     )
-    # Send the confirmation as a new message.
     await context.bot.send_message(chat_id=update.effective_chat.id, text=confirmation_message, parse_mode=ParseMode.HTML)
 
 @restricted

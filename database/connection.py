@@ -26,15 +26,11 @@ except Exception as e:
     transactions_collection = None
 
 def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, source: str = "text"):
-    """
-    Saves a new transaction document with the new keywords schema.
-    The 'merchant' field is now the first keyword.
-    """
+    """Saves a new transaction document with the new keywords schema."""
     if transactions_collection is None:
         print("❌ Cannot save transaction, database not connected.")
         return None
 
-    # Standardize keywords: ensure they are clean and in a list.
     keywords = parsed_data.get('keywords', [])
     if not isinstance(keywords, list):
         keywords = [keywords]
@@ -44,7 +40,7 @@ def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, so
         "parsedData": {
             "amount": round(float(parsed_data.get("amount", 0.0)), 2),
             "currency": parsed_data.get("currency", "SGD"),
-            "keywords": keywords # Save the new keywords array
+            "keywords": keywords
         },
         "source": source,
         "imageUrl": image_url,
@@ -60,13 +56,8 @@ def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, so
         print(f"❌ Error saving transaction: {e}")
         return None
 
-def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
-    """
-    Fetches transactions based on dynamic filters. Now also searches keywords.
-    """
-    if transactions_collection is None:
-        return None
-
+def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
+    """Helper function to build the MongoDB $match pipeline."""
     now = datetime.now()
     start_date = None
     if timeframe == 'day':
@@ -77,30 +68,62 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
     elif timeframe == 'month':
         start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
-    pipeline = []
-    
+    match_conditions = {}
     if start_date:
-        pipeline.append({"$match": {"createdAt": {"$gte": start_date}}})
+        match_conditions["createdAt"] = {"$gte": start_date}
         
     if filter_type and filter_value:
-        # Search both category and the new keywords array
-        field_to_filter = "category" if filter_type == "category" else "parsedData.keywords"
-        pipeline.append({"$match": {field_to_filter: {"$regex": f"^{filter_value}$", "$options": "i"}}})
+        # Create a case-insensitive regex for flexible matching
+        regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
+        
+        # --- FIX: Always search both category and keywords for any filter. ---
+        # This makes the query robust against AI misclassifying a keyword as a category.
+        match_conditions["$or"] = [
+            {"category": regex_filter},
+            {"parsedData.keywords": regex_filter}
+        ]
+            
+    return [{"$match": match_conditions}] if match_conditions else []
 
-    pipeline.append({
-        "$group": {
-            "_id": "$category",
-            "totalAmount": {"$sum": "$parsedData.amount"},
-            "count": {"$sum": 1}
-        }
-    })
+def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
+    """Fetches transactions based on dynamic filters and aggregates them for summaries."""
+    if transactions_collection is None: return None
     
-    pipeline.append({"$sort": {"totalAmount": -1}})
+    pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
+
+    # If filtering by keywords, group by keyword instead of category
+    if filter_type == 'keywords' and filter_value and filter_value != 'none':
+        pipeline.extend([
+            {"$unwind": "$parsedData.keywords"},
+            {"$match": {"parsedData.keywords": {"$regex": f"{filter_value}", "$options": "i"}}},
+            {"$group": {"_id": "$parsedData.keywords", "totalAmount": {"$sum": "$parsedData.amount"}, "count": {"$sum": 1}}},
+            {"$sort": {"totalAmount": -1}}
+        ])
+    else:
+        pipeline.extend([
+            {"$group": {"_id": "$category", "totalAmount": {"$sum": "$parsedData.amount"}, "count": {"$sum": 1}}},
+            {"$sort": {"totalAmount": -1}}
+        ])
 
     try:
         results = list(transactions_collection.aggregate(pipeline))
         print(f"🔍 Found {len(results)} aggregated results for query: {pipeline}")
         return results
     except Exception as e:
-        print(f"❌ Error fetching spending data: {e}")
+        print(f"❌ Error fetching spending summary: {e}")
+        return None
+
+def get_raw_transactions(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
+    """Fetches a raw list of transactions based on dynamic filters."""
+    if transactions_collection is None: return None
+
+    pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
+    pipeline.append({"$sort": {"createdAt": -1}}) # Sort by most recent
+
+    try:
+        results = list(transactions_collection.aggregate(pipeline))
+        print(f"🔍 Found {len(results)} raw transactions for query: {pipeline}")
+        return results
+    except Exception as e:
+        print(f"❌ Error fetching raw transactions: {e}")
         return None
