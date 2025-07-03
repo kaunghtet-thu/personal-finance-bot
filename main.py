@@ -7,7 +7,8 @@ from telegram.ext import (
     MessageHandler, 
     filters,
     ConversationHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    PicklePersistence # Import PicklePersistence for robust state handling
 )
 from bot import handlers
 
@@ -18,7 +19,11 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in .env file!")
 
-    application = ApplicationBuilder().token(token).build()
+    # --- Set up persistence ---
+    # This will save conversation states to a file, making the bot more stable.
+    persistence = PicklePersistence(filepath="conversation_persistence")
+
+    application = ApplicationBuilder().token(token).persistence(persistence).build()
 
     # --- Set up the main ConversationHandler for menu navigation ---
     conv_handler = ConversationHandler(
@@ -43,7 +48,10 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", handlers.cancel), CommandHandler("start", handlers.start)],
         # Allow re-entry to the start command to show the menu again
-        allow_reentry=True
+        allow_reentry=True,
+        # Use the persistence layer
+        persistent=True,
+        name="main_conversation"
     )
 
     # Add the main conversation handler to the application

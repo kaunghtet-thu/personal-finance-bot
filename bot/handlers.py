@@ -43,8 +43,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # If the function is called via a command, send a new message.
-    # If it's called via a button press (from another part of the conversation), edit the existing message.
+    # Clear any leftover user data from previous conversations
+    context.user_data.clear()
+    
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
@@ -99,7 +100,9 @@ async def handle_transaction_details(update: Update, context: ContextTypes.DEFAU
 
 async def received_merchant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the user's reply with the merchant name."""
-    merchant_name = update.message.text
+    # --- FIX: Standardize the merchant name to Title Case ---
+    merchant_name = update.message.text.strip().title()
+    
     transaction_info = context.user_data.get('transaction')
     if not transaction_info:
         await update.message.reply_text("Sorry, something went wrong. Please start over with /start.")
