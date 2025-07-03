@@ -1,0 +1,61 @@
+# ------------------ .gitignore ------------------
+
+# Python
+# ----------------------------------------------------------------
+# Virtual Environment
+venv/
+/venv/
+.venv/
+/.venv/
+
+# Cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Project Specific
+# ----------------------------------------------------------------
+# Environment variables file - contains secrets!
+.env
+
+# Telegram Bot persistence file - contains user session data
+conversation_persistence
+
+# Local data directories (e.g., for a local MongoDB instance)
+data/
+
+# IDE specific
+# ----------------------------------------------------------------
+# VSCode
+.vscode/
+# PyCharm
+.idea/
+
+# Operating System files
+# ----------------------------------------------------------------
+# Mac
+.DS_Store
+# Windows
+Thumbs.db
+
+.env

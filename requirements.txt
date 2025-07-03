@@ -1,0 +1,27 @@
+# ------------------ requirements.txt ------------------
+# Core framework and server
+fastapi
+uvicorn
+
+# Telegram bot library
+python-telegram-bot
+
+# Database connector - Pinned versions for stability
+pymongo==4.6.2
+dnspython==2.6.1
+
+# Environment variable management
+python-dotenv
+
+# Image processing and OCR
+Pillow
+pytesseract
+
+# NLP (optional but recommended for better extraction)
+spacy
+
+# Provides up-to-date SSL certificates for secure connections - Pinned version
+certifi==2024.6.2
+
+# OpenAI API client - Pinned to a modern, stable version
+openai==1.35.7
