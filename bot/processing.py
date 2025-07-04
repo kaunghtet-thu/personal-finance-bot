@@ -127,7 +127,7 @@ async def extract_initial_details(text: str) -> dict:
     print(f"Found amount: {parsed_data.get('amount')}")
     print(f"Initial keyword (merchant): {merchant}")
 
-    parsed_data["date"] = datetime.now().date().isoformat()
+    # Do not set a separate 'date' field; rely on createdAt in DB
     return parsed_data
 
 def preprocess_image_for_ocr(image_bytes: bytearray) -> Image.Image:

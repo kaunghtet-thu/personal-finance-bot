@@ -72,17 +72,17 @@ def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
     if start_date:
         match_conditions["createdAt"] = {"$gte": start_date}
         
-    if filter_type and filter_value:
+    if filter_type and filter_value and filter_value != 'none':
         # Create a case-insensitive regex for flexible matching
         regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
-        
         # --- FIX: Always search both category and keywords for any filter. ---
         # This makes the query robust against AI misclassifying a keyword as a category.
         match_conditions["$or"] = [
             {"category": regex_filter},
             {"parsedData.keywords": regex_filter}
         ]
-            
+    # If filter_type/filter_value is none or 'none', do not add $or filter at all
+    
     return [{"$match": match_conditions}] if match_conditions else []
 
 def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
@@ -100,18 +100,29 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
             {"$sort": {"totalAmount": -1}}
         ])
     else:
+        # For summarize/total, group by None and also return the list of transactions for debugging
+        pipeline_for_list = list(pipeline)  # Copy for debugging
         pipeline.extend([
-            {"$group": {"_id": "$category", "totalAmount": {"$sum": "$parsedData.amount"}, "count": {"$sum": 1}}},
-            {"$sort": {"totalAmount": -1}}
+            {"$group": {"_id": None, "totalAmount": {"$sum": "$parsedData.amount"}, "count": {"$sum": 1}}}
         ])
 
     try:
         results = list(transactions_collection.aggregate(pipeline))
         print(f"🔍 Found {len(results)} aggregated results for query: {pipeline}")
-        return results
+        # For summarize/total, return a dict with total and count for the period
+        # Also, for debugging, print the list of transactions for today
+        if timeframe == 'day' and (not filter_type or filter_type == 'none'):
+            debug_list = list(transactions_collection.aggregate(pipeline_for_list + [{"$sort": {"createdAt": -1}}]))
+            print(f"[DEBUG] Transactions for today: {debug_list}")
+        if results and isinstance(results, list):
+            return {
+                "total_amount": results[0].get("totalAmount", 0),
+                "count": results[0].get("count", 0)
+            }
+        return {"total_amount": 0, "count": 0}
     except Exception as e:
         print(f"❌ Error fetching spending summary: {e}")
-        return None
+        return {"total_amount": 0, "count": 0}
 
 def get_raw_transactions(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
     """Fetches a raw list of transactions based on dynamic filters."""

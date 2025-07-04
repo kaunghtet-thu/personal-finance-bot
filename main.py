@@ -10,7 +10,16 @@ from telegram.ext import (
     CallbackQueryHandler,
     PicklePersistence
 )
+from telegram import BotCommand
 from bot import handlers
+
+async def set_my_commands(application):
+    commands = [
+        BotCommand("record", "Record a transaction"),
+        BotCommand("recap", "View a recap"),
+        BotCommand("cancel", "Cancel current operation"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 def main():
     """Run the bot."""
@@ -22,13 +31,22 @@ def main():
     persistence = PicklePersistence(filepath="conversation_persistence")
     application = ApplicationBuilder().token(token).persistence(persistence).build()
 
+    # Set bot commands for BotFather-like interface
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(set_my_commands(application))
+
     # --- Set up the main ConversationHandler for menu navigation ---
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", handlers.start)],
+        entry_points=[CommandHandler("start", handlers.start),
+                     CommandHandler("record", handlers.start_transaction_flow),
+                     CommandHandler("recap", handlers.start_recap_flow)
+        ],
         states={
             handlers.MAIN_MENU: [
                 CallbackQueryHandler(handlers.start_transaction_flow, pattern="^record_transaction$"),
                 CallbackQueryHandler(handlers.start_recap_flow, pattern="^view_recap$"),
+                # If user sends a text in main menu, treat as record
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.start_transaction_flow),
             ],
             # States for recording a transaction
             handlers.GETTING_TRANSACTION_DETAILS: [
@@ -61,7 +79,7 @@ def main():
     # app.add_error_handler(error_handler)
 
 
-    print("🚀 Bot is starting in polling mode with a new keyword-based interface...")
+    print("🚀 Bot has started...")
     application.run_polling()
 
 if __name__ == "__main__":

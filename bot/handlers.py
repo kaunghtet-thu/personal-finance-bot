@@ -2,7 +2,7 @@
 import os
 import json
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 from openai import AsyncOpenAI
@@ -34,34 +34,39 @@ def restricted(func):
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# --- Main Menu ---
+
+# --- Main Menu & Keyboard Utility ---
+def get_main_menu_keyboard():
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+    reply_keyboard = [
+        [KeyboardButton("/record"), KeyboardButton("/recap")],
+        [KeyboardButton("/cancel")]
+    ]
+    return ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the main menu and sets the state."""
-    keyboard = [
-        [InlineKeyboardButton("✍️ Record Transaction", callback_data="record_transaction")],
-        [InlineKeyboardButton("📊 View Recap", callback_data="view_recap")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     context.user_data.clear()
-    
-    message_text = f"👋 Hello {update.effective_user.first_name}! What would you like to do?"
-    
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text("Main Menu:", reply_markup=reply_markup)
-    else:
-        await update.message.reply_html(message_text, reply_markup=reply_markup)
-        
+    message_text = f"👋 Hellooo {update.effective_user.first_name}!\nI'm ready to help you track your expenses.\nChoose an action below to get started!"
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=message_text,
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
     return MAIN_MENU
 
 # --- Transaction Recording Flow ---
 @restricted
 async def start_transaction_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Asks the user for transaction details."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text="Please send me the transaction details.\n\n(e.g., `caifan 8.50`, just `12`, or a photo of a receipt)")
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(text="Ready to record!!!\nJust gimme amount and keywords\n(e.g., `10.50 lunch, project meeting`)\nor send a photo of the receipt.")
+    else:
+        await update.message.reply_text("Ready to record!!!\nJust gimme amount and keywords\n(e.g., `10.50 lunch, project meeting`)\nor send a photo of the receipt.")
     return GETTING_TRANSACTION_DETAILS
 
 async def handle_transaction_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -87,7 +92,7 @@ async def handle_transaction_details(update: Update, context: ContextTypes.DEFAU
     context.user_data['transaction'] = {'parsed_data': parsed_data, 'raw_text': raw_text, 'source': source}
 
     if not parsed_data.get("keywords"):
-        await update.message.reply_text(f"I see a transaction of SGD {parsed_data['amount']:.2f}. What was the merchant/main keyword?")
+        await update.message.reply_text(f"I see a transaction of SGD {parsed_data['amount']:.2f}. What did you spend it on?")
         return GETTING_MERCHANT
     else:
         return await ask_for_more_keywords(update, context)
@@ -159,24 +164,19 @@ async def skip_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Save and send confirmation, then show main menu as a new message (not edit)
     await save_and_confirm_transaction(update, context, transaction_info)
-
-    # Always send the main menu as a new message, not as an edit, to preserve order
-    keyboard = [
-        [InlineKeyboardButton("✍️ Record Transaction", callback_data="record_transaction")],
-        [InlineKeyboardButton("📊 View Recap", callback_data="view_recap")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    message_text = f"👋 Hello {update.effective_user.first_name}! What would you like to do?"
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-    return MAIN_MENU
+    # Show main menu with reply keyboard
+    return await start(update, context)
 
 # --- Recap Flow ---
 @restricted
 async def start_recap_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Asks the user what they want a recap of."""
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(text="What would you like a recap of?\n\n(e.g., `this week`, `show all food transactions`, `Starbucks spendings`)")
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(text="Ask me anything with keywords like summarize, list, show, or how much. ")
+    else:
+        await update.message.reply_text("Ask me anything with keywords like summarize, list, show, or how much. ")
     return GETTING_RECAP_QUERY
 
 async def handle_recap_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,15 +184,17 @@ async def handle_recap_query(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query_text = update.message.text
     await update.message.reply_text(f"Got it! Analyzing your request: \"{query_text}\"...")
 
+
     try:
         # 1. Use AI to parse the user's query into structured data
         parsing_prompt = (
             "You are a query parsing expert. Analyze the user's request and extract information into a JSON object. "
-            "The JSON should have: 'action' ('summarize' or 'list'), 'timeframe' (day, week, month, all), "
+            "The JSON should have: 'action' ('summarize' or 'list'), 'timeframe' (day, today, week, this week, month, all), "
             "'filter_type' (category, keywords, none), and 'filter_value' (the specific name or 'none'). "
             "If the user asks to 'show', 'list', or 'see' transactions, the action is 'list'. Otherwise, it's 'summarize'. "
             "If the filter value is a general category like 'food', 'transport', set filter_type to 'category'. "
             "If it's a specific item or brand like 'caifang', 'cig' or 'starbucks', set filter_type to 'keywords'.\n\n"
+            "If the user says 'today', set timeframe to 'day'. If 'this week' or 'week', set timeframe to 'week'. If 'this month' or 'month', set timeframe to 'month'. If 'all', set timeframe to 'all'.\n\n"
             f"User request: \"{query_text}\""
         )
         response = await client.chat.completions.create(
@@ -204,7 +206,14 @@ async def handle_recap_query(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"🧠 AI parsed recap query: {parsed_query}")
 
         action = parsed_query.get('action', 'summarize')
-        timeframe = parsed_query.get('timeframe', 'week')
+        # Normalize timeframe for today/this week/this month
+        timeframe = parsed_query.get('timeframe', 'week').lower()
+        if timeframe in ['today']:
+            timeframe = 'day'
+        elif timeframe in ['this week']:
+            timeframe = 'week'
+        elif timeframe in ['this month']:
+            timeframe = 'month'
         filter_type = parsed_query.get('filter_type', 'none')
         filter_value = parsed_query.get('filter_value', 'none')
 
@@ -276,9 +285,18 @@ async def save_and_confirm_transaction(update: Update, context: ContextTypes.DEF
 @restricted
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancels the current operation and shows the main menu."""
-    await update.message.reply_text("Operation cancelled.")
-    return await start(update, context)
+    await update.message.reply_text("Operation cancelled.", reply_markup=get_main_menu_keyboard())
+    return MAIN_MENU
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Log Errors caused by Updates."""
     print(f"❌ An error occurred: {context.error}")
+
+async def set_my_commands(application):
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("record", "Record a transaction"),
+        BotCommand("recap", "View a recap"),
+        BotCommand("cancel", "Cancel current operation"),
+    ]
+    await application.bot.set_my_commands(commands)

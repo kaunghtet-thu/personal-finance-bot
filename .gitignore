@@ -59,3 +59,4 @@ data/
 Thumbs.db
 
 .env
+start.sh
