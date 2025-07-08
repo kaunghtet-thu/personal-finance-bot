@@ -1,7 +1,7 @@
 # app_simple/telegram_handlers.py
 import logging
-from typing import Dict, Any, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Dict, Any, Optional, List
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 WAITING_FOR_AMOUNT, WAITING_FOR_KEYWORDS, WAITING_FOR_CONFIRMATION = range(3)
+
+# Helper function to chunk a list into rows of n
+def chunk_list(lst: List[str], n: int) -> List[List[str]]:
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
 
 class TelegramHandlers:
     """Simplified Telegram bot handlers."""
@@ -61,9 +65,25 @@ class TelegramHandlers:
             "• \"How much did I spend on transport this week?\"\n\n"
             "Just send me a message to get started!"
         )
-        
-        await update.message.reply_text(welcome_message, parse_mode=ParseMode.HTML)
+        # Get most used keywords for this user (limit 5)
+        most_used_keywords = await self.transaction_service.get_most_used_keywords(user_id, limit=5)
+        keyword_rows = chunk_list(most_used_keywords, 2) if most_used_keywords else []
+        custom_keyboard = ReplyKeyboardMarkup(
+            [["today", "this week"], *keyword_rows] if keyword_rows else [["today", "this week"]],
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
+        await update.message.reply_text(welcome_message, parse_mode=ParseMode.HTML, reply_markup=custom_keyboard)
     
+    async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /list command."""
+        user_id = update.effective_user.id
+        if not self._is_authorized(user_id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
+            return
+
+        await self._handle_spending_query(update, context, "list")
+
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /help command."""
         help_message = (
@@ -109,6 +129,18 @@ class TelegramHandlers:
         if not self._is_authorized(user_id):
             await update.message.reply_text("❌ You are not authorized to use this bot.")
             return ConversationHandler.END
+
+        # Special handling for custom keyboard shortcuts
+        if text.lower() == "today":
+            # Treat as shortcut for 'How much did I spend today?'
+            return await self._handle_spending_query(update, context, "How much did I spend today?")
+        elif text.lower() == "this week":
+            # Treat as shortcut for 'How much did I spend this week?'
+            return await self._handle_spending_query(update, context, "How much did I spend this week?")
+        # If text matches one of the most used keywords, treat as keyword summary
+        most_used_keywords = await self.transaction_service.get_most_used_keywords(user_id, limit=5)
+        if text in most_used_keywords:
+            return await self._handle_spending_query(update, context, f"Show summary for {text}")
         
         # Check if user is in keywords input state
         if user_id in self.temp_data and 'transaction_id' in self.temp_data[user_id]:
@@ -123,18 +155,16 @@ class TelegramHandlers:
     def _looks_like_transaction(self, text: str) -> bool:
         """Check if text looks like a transaction."""
         import re
-        
-        # Look for amount patterns
+        # Look for any number anywhere in the message
         amount_patterns = [
+            r'(\d+(?:\.\d{1,2})?)',  # any number
             r'\$\d+(?:\.\d{1,2})?',  # $5.50
             r'SGD\s*\d+(?:\.\d{1,2})?',  # SGD 5.50
             r'\d+(?:\.\d{1,2})?\s*(?:dollars?|bucks?)',  # 5.50 dollars
         ]
-        
         for pattern in amount_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 return True
-        
         return False
     
     async def _handle_transaction_recording(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> int:
@@ -202,11 +232,12 @@ class TelegramHandlers:
         """Parse transaction text to extract amount and keywords."""
         import re
         
-        # Extract amount
+        # Extract amount (first number anywhere in the message)
         amount = None
         
-        # Try different amount patterns
+        # Try different amount patterns (most flexible: any number, $number, SGD number, number dollars)
         amount_patterns = [
+            r'(\d+(?:\.\d{1,2})?)',  # any number
             r'\$(\d+(?:\.\d{1,2})?)',  # $5.50
             r'SGD\s*(\d+(?:\.\d{1,2})?)',  # SGD 5.50
             r'(\d+(?:\.\d{1,2})?)\s*(?:dollars?|bucks?)',  # 5.50 dollars
@@ -221,9 +252,9 @@ class TelegramHandlers:
         if not amount:
             raise ValueError("No amount found")
         
-        # Extract keywords (remove amount and common words)
-        # Remove amount from text
-        text_without_amount = re.sub(r'\$\d+(?:\.\d{1,2})?', '', text, flags=re.IGNORECASE)
+        # Remove the first occurrence of the amount from text for keywords
+        text_without_amount = re.sub(r'(\d+(?:\.\d{1,2})?)', '', text, count=1, flags=re.IGNORECASE)
+        text_without_amount = re.sub(r'\$\d+(?:\.\d{1,2})?', '', text_without_amount, flags=re.IGNORECASE)
         text_without_amount = re.sub(r'SGD\s*\d+(?:\.\d{1,2})?', '', text_without_amount, flags=re.IGNORECASE)
         
         # Split into words and filter
@@ -294,11 +325,14 @@ class TelegramHandlers:
                 'keywords': []
             }
             
+            # Show custom keyboard with '$' button for keyword input
+            custom_keyboard = ReplyKeyboardMarkup([
+                ["$"]
+            ], resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text(
-                f"💰 Detected amount: <b>SGD {amount:.2f}</b>\n\n"
-                "Please enter keywords for this transaction (e.g. merchant, place, tags):\n"
-                "Example: Starbucks, Jem, coffee",
-                parse_mode=ParseMode.HTML
+                f"💰 Detected amount: <b>SGD {amount:.2f}</b>\n\nPlease enter keywords for this transaction (e.g. merchant, place, tags):\nExample: Starbucks, Jem, coffee",
+                parse_mode=ParseMode.HTML,
+                reply_markup=custom_keyboard
             )
             return WAITING_FOR_KEYWORDS
         except Exception as e:
@@ -332,6 +366,13 @@ class TelegramHandlers:
                 return await self._handle_delete_transaction(update, context, callback_data)
             elif callback_data.startswith("add_keywords:"):
                 return await self._handle_add_keywords(update, context, callback_data)
+            elif callback_data.startswith("keyword_summary:"):
+                # Show summary for the selected keyword
+                keyword = callback_data.split(":", 1)[1]
+                # Use AnalyticsService to get summary for this keyword (formatted)
+                report = await self.analytics_service.generate_spending_report(f"Show summary for {keyword}")
+                await query.message.reply_text(report, parse_mode=ParseMode.HTML)
+                return ConversationHandler.END
             else:
                 await query.edit_message_text("❌ Unknown action.")
                 return ConversationHandler.END
@@ -357,7 +398,8 @@ class TelegramHandlers:
             transaction = await self.transaction_service.create_transaction_from_text(
                 raw_text=data['raw_text'],
                 amount=data['amount'],
-                keywords=data['keywords']
+                keywords=data['keywords'],
+                user_id=user_id
             )
             
             # Show success message with action buttons
@@ -371,20 +413,18 @@ class TelegramHandlers:
                 f"What would you like to do?"
             )
             
-            keyboard = [
-                [
-                    InlineKeyboardButton("🗑️ Delete Transaction", 
-                                       callback_data=f"delete_transaction:{transaction.id}"),
-                    InlineKeyboardButton("➕ Add Keywords", 
-                                       callback_data=f"add_keywords:{transaction.id}")
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
+            # Get most used unique first keywords for this user (by total spent, limit 5)
+            most_used_keywords = await self.transaction_service.get_most_used_keywords(user_id, limit=5)
+            keyword_rows = chunk_list(most_used_keywords, 2) if most_used_keywords else []
+            custom_keyboard = ReplyKeyboardMarkup(
+                [["today", "this week"], *keyword_rows] if keyword_rows else [["today", "this week"]],
+                resize_keyboard=True,
+                one_time_keyboard=False
+            )
             await query.message.reply_text(
                 success_text,
                 parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
+                reply_markup=custom_keyboard
             )
             
             # Clear temporary data
@@ -474,7 +514,8 @@ class TelegramHandlers:
                     raw_text=data['raw_text'],
                     amount=data['amount'],
                     keywords=keywords,
-                    source=TransactionSource.IMAGE
+                    source=TransactionSource.IMAGE,
+                    user_id=user_id
                 )
                 # Show success message with action buttons
                 time_str = transaction.created_at.strftime('%d %b %I:%M %p')

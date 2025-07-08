@@ -57,8 +57,8 @@ def save_transaction(raw_text: str, parsed_data: dict, image_url: str = None, so
         print(f"❌ Error saving transaction: {e}")
         return None
 
-def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
-    """Helper function to build the MongoDB $match pipeline."""
+def _get_base_match_conditions(timeframe: str):
+    """Helper function to build the base MongoDB match conditions with timeframe."""
     now = datetime.now()
     start_date = None
     if timeframe == 'day':
@@ -72,6 +72,11 @@ def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
     match_conditions = {}
     if start_date:
         match_conditions["createdAt"] = {"$gte": start_date}
+    return match_conditions
+
+def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
+    """Helper function to build the MongoDB $match pipeline."""
+    match_conditions = _get_base_match_conditions(timeframe)
         
     if filter_type and filter_value and filter_value != 'none':
         # Create a case-insensitive regex for flexible matching
@@ -86,51 +91,9 @@ def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
     
     return [{"$match": match_conditions}] if match_conditions else []
 
-def _get_match_pipeline_keywords_after_first(timeframe: str, filter_value: str):
-    """Builds a pipeline to match keywords only after the first position."""
-    now = datetime.now()
-    start_date = None
-    if timeframe == 'day':
-        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif timeframe == 'week':
-        start_date = now - timedelta(days=now.weekday())
-        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif timeframe == 'month':
-        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    match_conditions = {}
-    if start_date:
-        match_conditions["createdAt"] = {"$gte": start_date}
-    # Only match if keyword is in position > 0
-    regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
-    pipeline = [
-        {"$match": match_conditions},
-        {"$project": {
-            "rawText": 1,
-            "parsedData": 1,
-            "source": 1,
-            "imageUrl": 1,
-            "category": 1,
-            "createdAt": 1,
-            "keywords_after_first": {"$slice": ["$parsedData.keywords", 1, {"$size": "$parsedData.keywords"}]}
-        }},
-        {"$match": {"keywords_after_first": regex_filter}}
-    ]
-    return pipeline
-
 def _get_match_pipeline_all_keywords(timeframe: str, filter_value: str):
     """Builds a pipeline to match keywords in any position."""
-    now = datetime.now()
-    start_date = None
-    if timeframe == 'day':
-        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif timeframe == 'week':
-        start_date = now - timedelta(days=now.weekday())
-        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif timeframe == 'month':
-        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    match_conditions = {}
-    if start_date:
-        match_conditions["createdAt"] = {"$gte": start_date}
+    match_conditions = _get_base_match_conditions(timeframe)
     # Match if keyword is in any position
     regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
     match_conditions["parsedData.keywords"] = regex_filter

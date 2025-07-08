@@ -282,7 +282,7 @@ class TransactionService:
         self.ocr_service = ocr_service
     
     async def create_transaction_from_text(self, raw_text: str, amount: float, 
-                                         keywords: List[str], source: TransactionSource = TransactionSource.TEXT) -> Transaction:
+                                         keywords: List[str], source: TransactionSource = TransactionSource.TEXT, user_id: int = None) -> Transaction:
         """Create a transaction from text input."""
         try:
             # Validate input
@@ -295,6 +295,9 @@ class TransactionService:
             # Categorize transaction using AI
             first_keyword = keywords[0]
             category = await self.ai_service.categorize_transaction(first_keyword, amount)
+            # If uncategorized or other, and multiple keywords, retry with first keyword only
+            if (category.name.upper() in ["UNCATEGORIZED", "OTHER"]) and len(keywords) > 1:
+                category = await self.ai_service.categorize_transaction(first_keyword, amount)
             
             # Create transaction
             transaction = Transaction(
@@ -319,6 +322,8 @@ class TransactionService:
                 "category": transaction.category.value,
                 "createdAt": transaction.created_at
             }
+            if user_id is not None:
+                doc["userId"] = user_id
             result = connection.transactions_collection.insert_one(doc)
             transaction.id = str(result.inserted_id)
             
@@ -435,6 +440,22 @@ class TransactionService:
         except Exception as e:
             print(f"Failed to get transactions by timeframe: {e}")
             raise Exception(f"Failed to get transactions: {e}")
+    
+    async def get_most_used_keywords(self, user_id: int, limit: int = 5) -> list:
+        """Get the most used unique first keywords for a user, sorted by total amount spent (descending)."""
+        try:
+            pipeline = [
+                {"$match": {"userId": user_id}},
+                {"$project": {"first_keyword": {"$arrayElemAt": ["$parsedData.keywords", 0]}, "amount": "$parsedData.amount"}},
+                {"$group": {"_id": "$first_keyword", "totalSpent": {"$sum": "$amount"}}},
+                {"$sort": {"totalSpent": -1}},
+                {"$limit": limit}
+            ]
+            results = list(connection.transactions_collection.aggregate(pipeline))
+            return [r["_id"] for r in results if r["_id"]]
+        except Exception as e:
+            print(f"Failed to get most used keywords for user {user_id}: {e}")
+            return []
 
 class AnalyticsService:
     """Service for spending analytics and reporting."""
@@ -446,6 +467,16 @@ class AnalyticsService:
     async def analyze_spending_query(self, query_text: str) -> Dict[str, Any]:
         """Analyze a natural language spending query and return results."""
         try:
+            # Handle simple "list" command directly
+            if query_text.strip().lower() == "list":
+                transactions = await self.transaction_service.get_transactions_by_timeframe(TimeFrame.ALL, FilterType.NONE, None)
+                return {
+                    'action': 'list',
+                    'transactions': transactions,
+                    'total_amount': sum(t.amount for t in transactions),
+                    'count': len(transactions)
+                }
+
             # Parse the query using AI
             parsed_query = await self.ai_service.parse_recap_query(query_text)
             
@@ -501,28 +532,45 @@ class AnalyticsService:
             analysis = await self.analyze_spending_query(query_text)
             
             if analysis['action'] == 'list':
-                # Generate list report
+                # Generate list report in a compact table format
                 transactions = analysis['transactions']
                 total_amount = analysis['total_amount']
                 count = analysis['count']
-                
+
                 if not transactions:
                     return "I couldn't find any matching transactions for your request."
-                
-                report = f"📋 <b>Transactions for '{query_text}':</b>\n\n"
+
+                # Sort transactions by date, newest first
+                transactions.sort(key=lambda x: x.created_at, reverse=True)
+
+                report = f"📋 <b>Transactions for '{query_text}'</b>\n\n"
+
+                # Using a more compact table format without category
+                table_rows = []
+                # Header
+                table_rows.append(f"{'Date':<10} {'Amount':>8}  {'Details'}\n")
+                table_rows.append("-" * 30 + "\n")
+
                 for tx in transactions:
-                    date_str = tx.created_at.strftime('%d %b %I:%M %p')  # Add time with AM/PM
-                    keywords = ", ".join(tx.keywords) if tx.keywords else "No keywords"
-                    category = tx.category.value
-                    report += f"🗓️ <b>{date_str}</b>\n"
-                    report += f"💰 <b>SGD {tx.amount:.2f}</b>\n"
-                    report += f"🏷️ {keywords}\n"
-                    report += f"📂 {category}\n\n"
-                
+                    date_str = tx.created_at.strftime('%d %b %y')
+                    amount_str = f"{tx.amount:.2f}"
+                    keywords = ", ".join(tx.keywords)
+                    
+                    # Truncate long keywords
+                    if len(keywords) > 15:
+                        keywords = keywords[:14] + "…"
+
+                    row = f"{date_str:<10} {amount_str:>8}  {keywords}\n"
+                    table_rows.append(row)
+
+                report += f"<pre><code>{''.join(table_rows)}</code></pre>\n"
+
+                # Summary
                 report += f"📊 <b>Summary:</b>\n"
-                report += f"• Total Amount: <b>SGD {total_amount:.2f}</b>\n"
-                report += f"• Number of Transactions: <b>{count}</b>\n"
-                report += f"• Average per Transaction: <b>SGD {total_amount/count:.2f}</b>" if count > 0 else "• No transactions found"
+                report += f"• Total: <b>SGD {total_amount:.2f}</b> ({count} transactions)\n"
+                if count > 0:
+                    report += f"• Average: <b>SGD {total_amount/count:.2f}</b>"
+                
                 return report
             else:
                 # Generate summary report using AI

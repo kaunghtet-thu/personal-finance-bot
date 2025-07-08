@@ -83,6 +83,7 @@ async def main():
         # Add handlers
         application.add_handler(CommandHandler("start", handlers.start_command))
         application.add_handler(CommandHandler("help", handlers.help_command))
+        application.add_handler(CommandHandler("list", handlers.list_command))
         application.add_handler(conv_handler)
         
         # Add callback query handler for non-conversation callbacks
@@ -114,6 +115,8 @@ async def main():
         raise
 
 if __name__ == "__main__":
+    # Suppress httpx info logs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
