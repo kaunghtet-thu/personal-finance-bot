@@ -86,14 +86,61 @@ def _get_match_pipeline(timeframe: str, filter_type: str, filter_value: str):
     
     return [{"$match": match_conditions}] if match_conditions else []
 
+def _get_match_pipeline_keywords_after_first(timeframe: str, filter_value: str):
+    """Builds a pipeline to match keywords only after the first position."""
+    now = datetime.now()
+    start_date = None
+    if timeframe == 'day':
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif timeframe == 'week':
+        start_date = now - timedelta(days=now.weekday())
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif timeframe == 'month':
+        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    match_conditions = {}
+    if start_date:
+        match_conditions["createdAt"] = {"$gte": start_date}
+    # Only match if keyword is in position > 0
+    regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
+    pipeline = [
+        {"$match": match_conditions},
+        {"$project": {
+            "rawText": 1,
+            "parsedData": 1,
+            "source": 1,
+            "imageUrl": 1,
+            "category": 1,
+            "createdAt": 1,
+            "keywords_after_first": {"$slice": ["$parsedData.keywords", 1, {"$size": "$parsedData.keywords"}]}
+        }},
+        {"$match": {"keywords_after_first": regex_filter}}
+    ]
+    return pipeline
+
+def _get_match_pipeline_all_keywords(timeframe: str, filter_value: str):
+    """Builds a pipeline to match keywords in any position."""
+    now = datetime.now()
+    start_date = None
+    if timeframe == 'day':
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif timeframe == 'week':
+        start_date = now - timedelta(days=now.weekday())
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif timeframe == 'month':
+        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    match_conditions = {}
+    if start_date:
+        match_conditions["createdAt"] = {"$gte": start_date}
+    # Match if keyword is in any position
+    regex_filter = {"$regex": f"{filter_value}", "$options": "i"}
+    match_conditions["parsedData.keywords"] = regex_filter
+    return [{"$match": match_conditions}]
+
 def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
     """Fetches transactions based on dynamic filters and aggregates them for summaries."""
     if transactions_collection is None: return None
-    
-    pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
-
-    # If filtering by keywords, group by keyword instead of category
     if filter_type == 'keywords' and filter_value and filter_value != 'none':
+        pipeline = _get_match_pipeline_all_keywords(timeframe, filter_value)
         pipeline.extend([
             {"$unwind": "$parsedData.keywords"},
             {"$match": {"parsedData.keywords": {"$regex": f"{filter_value}", "$options": "i"}}},
@@ -101,20 +148,14 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
             {"$sort": {"totalAmount": -1}}
         ])
     else:
-        # For summarize/total, group by None and also return the list of transactions for debugging
+        pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
         pipeline_for_list = list(pipeline)  # Copy for debugging
         pipeline.extend([
             {"$group": {"_id": None, "totalAmount": {"$sum": "$parsedData.amount"}, "count": {"$sum": 1}}}
         ])
-
     try:
         results = list(transactions_collection.aggregate(pipeline))
         print(f"🔍 Found {len(results)} aggregated results for query: {pipeline}")
-        # For summarize/total, return a dict with total and count for the period
-        # Also, for debugging, print the list of transactions for today
-        if timeframe == 'day' and (not filter_type or filter_type == 'none'):
-            debug_list = list(transactions_collection.aggregate(pipeline_for_list + [{"$sort": {"createdAt": -1}}]))
-            print(f"[DEBUG] Transactions for today: {debug_list}")
         if results and isinstance(results, list):
             return {
                 "total_amount": results[0].get("totalAmount", 0),
@@ -128,10 +169,11 @@ def get_spending_data(timeframe: str = 'week', filter_type: str = None, filter_v
 def get_raw_transactions(timeframe: str = 'week', filter_type: str = None, filter_value: str = None):
     """Fetches a raw list of transactions based on dynamic filters."""
     if transactions_collection is None: return None
-
-    pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
+    if filter_type == 'keywords' and filter_value and filter_value != 'none':
+        pipeline = _get_match_pipeline_all_keywords(timeframe, filter_value)
+    else:
+        pipeline = _get_match_pipeline(timeframe, filter_type, filter_value)
     pipeline.append({"$sort": {"createdAt": -1}}) # Sort by most recent
-
     try:
         results = list(transactions_collection.aggregate(pipeline))
         print(f"🔍 Found {len(results)} raw transactions for query: {pipeline}")

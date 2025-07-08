@@ -1,4 +1,4 @@
-# ------------------ requirements.txt ------------------
+# ------------------ requirements_simple.txt ------------------
 # Core framework and server
 fastapi
 uvicorn
@@ -26,4 +26,4 @@ certifi==2024.6.2
 # OpenAI API client - Pinned to a modern, stable version
 openai==1.35.7
 # Add specific httpx version to resolve dependency conflict
-httpx==0.27.0
+httpx==0.27.0 
