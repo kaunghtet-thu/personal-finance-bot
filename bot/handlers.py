@@ -95,77 +95,17 @@ async def handle_transaction_details(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(f"I see a transaction of SGD {parsed_data['amount']:.2f}. What did you spend it on?")
         return GETTING_MERCHANT
     else:
-        return await ask_for_more_keywords(update, context)
+        return await save_and_confirm_transaction(update, context, context.user_data['transaction'])
 
 async def received_merchant(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the user's reply with the merchant name, which becomes the first keyword."""
+    """Handles the user's reply with the merchant name, which becomes the first keyword, then saves the transaction."""
     merchant_name = update.message.text.strip().title()
     transaction_info = context.user_data.get('transaction')
     if not transaction_info:
         await update.message.reply_text("Sorry, something went wrong. Please start over with /start.")
         return ConversationHandler.END
-        
     transaction_info['parsed_data']['keywords'] = [merchant_name]
-    return await ask_for_more_keywords(update, context)
-
-async def ask_for_more_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Asks the user if they want to add more keywords."""
-    transaction_info = context.user_data.get('transaction')
-    first_keyword = transaction_info['parsed_data']['keywords'][0]
-    amount = transaction_info['parsed_data']['amount']
-    
-    category = await processing.get_category_from_openai(first_keyword, amount)
-    transaction_info['parsed_data']['category'] = category
-
-    keyboard = [[InlineKeyboardButton("Skip", callback_data="skip_keywords")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent_message = await update.message.reply_html(
-        f"Logged: SGD {amount:.2f} at <b>{first_keyword}</b> (Category: {category} 🤖)\n\n"
-        "Do you want to add more keywords or tags? (e.g., `lunch, project meeting`). "
-        "Send your keywords or press Skip.",
-        reply_markup=reply_markup
-    )
-    context.user_data['prompt_message_id'] = sent_message.message_id
-    return GETTING_KEYWORDS
-
-async def received_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives additional keywords and finalizes the transaction."""
-    transaction_info = context.user_data.get('transaction')
-    if not transaction_info:
-        await update.message.reply_text("Sorry, something went wrong. Please start over with /start.")
-        return ConversationHandler.END
-
-    new_keywords = [kw.strip().lower() for kw in update.message.text.split(',')]
-    transaction_info['parsed_data']['keywords'].extend(new_keywords)
-    
-    prompt_message_id = context.user_data.get('prompt_message_id')
-    if prompt_message_id:
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=update.effective_chat.id,
-                message_id=prompt_message_id,
-                reply_markup=None
-            )
-        except Exception as e:
-            print(f"Could not edit message reply markup: {e}")
-    
-    await save_and_confirm_transaction(update, context, transaction_info)
-    return await start(update, context)
-
-async def skip_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Skips adding extra keywords and finalizes the transaction."""
-    query = update.callback_query
-    await query.answer()
-
-    transaction_info = context.user_data.get('transaction')
-    if not transaction_info:
-        return await start(update, context)
-
-    # Save and send confirmation, then show main menu as a new message (not edit)
-    await save_and_confirm_transaction(update, context, transaction_info)
-    # Show main menu with reply keyboard
-    return await start(update, context)
+    return await save_and_confirm_transaction(update, context, transaction_info)
 
 # --- Recap Flow ---
 @restricted
@@ -265,13 +205,15 @@ async def handle_recap_query(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- Utility Functions ---
 async def save_and_confirm_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, transaction_info: dict):
-    """Finalizes the transaction, saves it, and sends a confirmation."""
+    """Finalizes the transaction, saves it, and sends a confirmation with options to delete or add keywords."""
     parsed_data = transaction_info['parsed_data']
-    connection.save_transaction(
+    inserted_id = connection.save_transaction(
         raw_text=transaction_info['raw_text'], 
         parsed_data=parsed_data, 
         source=transaction_info['source']
     )
+    transaction_info['inserted_id'] = str(inserted_id) if inserted_id else None
+    context.user_data['last_transaction_id'] = str(inserted_id) if inserted_id else None
     
     keywords_str = ", ".join(parsed_data.get('keywords', []))
     confirmation_message = (
@@ -280,7 +222,39 @@ async def save_and_confirm_transaction(update: Update, context: ContextTypes.DEF
         f"<b>Category:</b> {parsed_data.get('category', 'Uncategorized')} 🤖\n"
         f"<b>Keywords:</b> {keywords_str}"
     )
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=confirmation_message, parse_mode=ParseMode.HTML)
+    # Add inline buttons for delete and add keywords
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = [
+        [
+            InlineKeyboardButton("Delete Transaction", callback_data="delete_transaction"),
+            InlineKeyboardButton("Add More Keywords", callback_data="add_keywords")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=confirmation_message, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    return GETTING_KEYWORDS
+
+# --- Add handler for delete and add keywords ---
+async def transaction_options_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "delete_transaction":
+        # Delete the last transaction by ID
+        transaction_id = context.user_data.get('last_transaction_id')
+        if transaction_id:
+            deleted = connection.delete_transaction_by_id(transaction_id)
+            if deleted:
+                await query.edit_message_text("🗑️ Transaction deleted successfully.")
+            else:
+                await query.edit_message_text("❌ Could not delete transaction. It may have already been deleted or does not exist.")
+        else:
+            await query.edit_message_text("❌ No transaction to delete. Please record a transaction first.")
+        return await start(update, context)
+    elif data == "add_keywords":
+        await query.edit_message_text("Send more keywords to add to this transaction (comma separated):")
+        context.user_data['adding_keywords'] = True
+        return GETTING_KEYWORDS
 
 @restricted
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -300,3 +274,34 @@ async def set_my_commands(application):
         BotCommand("cancel", "Cancel current operation"),
     ]
     await application.bot.set_my_commands(commands)
+
+async def received_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles adding keywords to an existing transaction if adding_keywords is set."""
+    adding_keywords = context.user_data.get('adding_keywords', False)
+    if adding_keywords:
+        transaction_id = context.user_data.get('last_transaction_id')
+        if not transaction_id:
+            await update.message.reply_text("❌ Sorry, no transaction to update. Please record a transaction first.")
+            return ConversationHandler.END
+        new_keywords = [kw.strip().lower() for kw in update.message.text.split(',') if kw.strip()]
+        if not new_keywords:
+            await update.message.reply_text("⚠️ No keywords provided. Please send at least one keyword, or /cancel.")
+            return GETTING_KEYWORDS
+        updated = connection.update_transaction_keywords_by_id(transaction_id, new_keywords)
+        if updated:
+            await update.message.reply_text(f"✅ Added keywords: {', '.join(new_keywords)}")
+        else:
+            await update.message.reply_text("❌ Could not update transaction. It may not exist or no new keywords were added.")
+        context.user_data['adding_keywords'] = False
+        return await start(update, context)
+    else:
+        await update.message.reply_text("No transaction to add keywords to. Use /record to start a new transaction.")
+        return ConversationHandler.END
+
+async def debug_callback_handler(update, context):
+    try:
+        await update.callback_query.answer("Debug: Button pressed!")
+        await update.callback_query.edit_message_text("Debug: Button was pressed.")
+    except Exception as e:
+        print(f"Debug handler error: {e}")
+        await update.effective_message.reply_text(f"Debug handler error: {e}")

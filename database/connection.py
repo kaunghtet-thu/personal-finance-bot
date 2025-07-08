@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pymongo
 import certifi
 from dotenv import load_dotenv
+from bson import ObjectId
 
 # Load environment variables from .env file
 load_dotenv()
@@ -138,3 +139,40 @@ def get_raw_transactions(timeframe: str = 'week', filter_type: str = None, filte
     except Exception as e:
         print(f"❌ Error fetching raw transactions: {e}")
         return None
+
+def delete_transaction_by_id(transaction_id: str) -> bool:
+    """Deletes a transaction by its MongoDB _id. Returns True if deleted, False otherwise."""
+    if transactions_collection is None:
+        print("❌ Cannot delete transaction, database not connected.")
+        return False
+    try:
+        result = transactions_collection.delete_one({"_id": ObjectId(transaction_id)})
+        if result.deleted_count == 1:
+            print(f"🗑️ Transaction {transaction_id} deleted.")
+            return True
+        else:
+            print(f"❌ Transaction {transaction_id} not found.")
+            return False
+    except Exception as e:
+        print(f"❌ Error deleting transaction: {e}")
+        return False
+
+def update_transaction_keywords_by_id(transaction_id: str, new_keywords: list) -> bool:
+    """Appends new keywords to the keywords array for a transaction by its _id. Returns True if updated, False otherwise."""
+    if transactions_collection is None:
+        print("❌ Cannot update transaction, database not connected.")
+        return False
+    try:
+        result = transactions_collection.update_one(
+            {"_id": ObjectId(transaction_id)},
+            {"$addToSet": {"parsedData.keywords": {"$each": new_keywords}}}
+        )
+        if result.modified_count == 1:
+            print(f"✅ Added keywords to transaction {transaction_id}: {new_keywords}")
+            return True
+        else:
+            print(f"❌ Transaction {transaction_id} not found or no new keywords added.")
+            return False
+    except Exception as e:
+        print(f"❌ Error updating transaction: {e}")
+        return False

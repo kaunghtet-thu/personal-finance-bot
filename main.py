@@ -56,7 +56,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.received_merchant)
             ],
             handlers.GETTING_KEYWORDS: [
-                CallbackQueryHandler(handlers.skip_keywords, pattern="^skip_keywords$"),
+                CallbackQueryHandler(handlers.transaction_options_handler, pattern="^(delete_transaction|add_keywords)$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.received_keywords)
             ],
             # State for getting a recap query
